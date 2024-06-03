@@ -1,0 +1,298 @@
+import tkinter#imports the libary for the gui
+import threading#allows concurrent processing
+import time#used for delays
+import random#allows randomisation
+import datetime#allows timestamps
+
+# Global flag to control the execution of threads
+is_running = False#creates a variable called is_running and sets it to false and is used to track of conditions
+check_and_close_empty_lanes_timer = None
+
+# Base class for lanes
+class LaneBase:
+    # Generates a timestamp in the format of Hours:Minutes:Seconds
+    @staticmethod
+    def generate_timestamp():
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        return timestamp
+
+# Represents each checkout lane
+class CheckoutLane(LaneBase):
+    # Dictionary to store instances of lanes
+    all_lanes = {}
+
+    def __init__(self, name: str, max_queue_length: int, time_to_process: int):
+        self.name = name
+        self.queue = []
+        self.status = 'Closed'
+        self.MAX_QUEUE_LENGTH = max_queue_length
+        self.TTP = time_to_process
+        self.processing_thread = None
+
+        CheckoutLane.all_lanes[name] = self
+
+    def calculate_queue_time(self):
+        return sum(basket * self.TTP for basket in self.queue)
+
+    def open_lane(self):
+        if self.status == 'Closed':
+            self.status = 'Open'
+            print(f'{self.name} -> Lane opened')
+
+    def close_if_empty(self):
+        global check_and_close_empty_lanes_timer
+
+        if self.status == 'Open' and not self.queue:
+            if not check_and_close_empty_lanes_timer:
+                # Start a timer for checking empty lanes
+                check_and_close_empty_lanes_timer = threading.Timer(30, self.close_lane)
+                check_and_close_empty_lanes_timer.start()
+            else:
+                # Cancel previous timer if a new customer joins before timeout
+                check_and_close_empty_lanes_timer.cancel()
+                check_and_close_empty_lanes_timer = threading.Timer(30, self.close_lane)
+                check_and_close_empty_lanes_timer.start()
+
+    def close_lane(self):
+        self.status = 'Closed'
+
+    def add_to_queue(self, basket_size: int):
+        if len(self.queue) < self.MAX_QUEUE_LENGTH and self.status == 'Open':
+            if basket_size < 10:
+                self.queue.append(basket_size)
+            else:
+                # Find open lanes of the same type
+                open_lanes_of_same_type = [lane for lane in CheckoutLane.all_lanes.values() if
+                                           lane.status == 'Open' and lane.name != self.name]
+                while open_lanes_of_same_type:
+                    # Move to the shortest available lane
+                    shortest_lane = min(open_lanes_of_same_type, key=lambda lane: len(lane.queue))
+                    if shortest_lane is not self:
+                        shortest_lane.queue.append(basket_size)
+                        print(f'{self.name} -> Moving customer to {shortest_lane.name}')
+                        break
+                    else:
+                        # Remove the current lane from the options to avoid an infinite loop
+                        open_lanes_of_same_type.remove(self)
+                else:
+                    self.queue.append(basket_size)
+                    print(f'{self.name} -> No open lanes available')
+
+    def print_lane_status(self):
+        estimated_time = self.calculate_queue_time()
+        print(f'{self.name} -> Status: {self.status}')
+
+        if self.status == 'Open' and self.queue:
+            print(f'Customers in queue: {len(self.queue)}, Estimated time: {estimated_time} seconds')
+        else:
+            print('No customers in the queue.')
+
+    @staticmethod
+    def open_new_lanes():
+        # Find closed lanes
+        closed_lanes = [lane for lane in CheckoutLane.all_lanes.values() if lane.status == 'Closed']
+
+        # Open new lanes
+        for i, lane in enumerate(closed_lanes):
+            lane.open_lane()
+            print(f'New lane opened: {lane.name}')
+
+    @staticmethod
+    def process_customers():
+        while is_running:
+            # Find open lanes
+            open_lanes = [lane for lane in CheckoutLane.all_lanes.values() if lane.status == 'Open']
+
+            # Close lanes if empty
+            for lane in open_lanes:
+                lane.close_if_empty()
+
+            # Process customers
+            for lane in open_lanes:
+                if lane.queue:
+                    lane.print_lane_status()
+                    lane.processing_thread = threading.Thread(target=CheckoutLane.process_customer, args=(lane,))
+                    lane.processing_thread.start()
+
+            # Wait for all threads to finish
+            for lane in open_lanes:
+                if lane.processing_thread:
+                    lane.processing_thread.join()
+
+            # Open new lanes if necessary
+            if len(open_lanes) == len(CheckoutLane.all_lanes):
+                CheckoutLane.open_new_lanes()
+
+            # Wait for a random amount of time before processing customers again
+            time.sleep(random.randint(1, 5))
+
+    @staticmethod
+    def process_customer(lane):
+        # Process the first customer in the queue
+        basket_size = lane.queue.pop(0)
+        print(f'{lane.name} -> Processing customer with {basket_size} items...')
+        time.sleep(basket_size * lane.TTP)
+        print(f'{lane.name} -> Customer processed')
+
+    def add_customer_to_lane(self, basket_size: int):
+        if self.status == 'Closed':
+            print(f'Customer with {basket_size} items couldn\'t join {self.name} (lane closed)')
+            return
+
+        # Check if there is an open lane of the same type first
+        lanes_of_same_type = [lane for lane in CheckoutLane.all_lanes.values() if
+                              lane.name.startswith(self.name[0]) and lane.status == 'Open']
+        if lanes_of_same_type:
+            chosen_lane = random.choice(lanes_of_same_type)
+            chosen_lane.add_to_queue(basket_size)
+            print(f'Customer with {basket_size} items joined {chosen_lane.name}')
+            chosen_lane.process_customers()  # Call process_customers instead of start_processing_basket
+            return
+
+        # If no open lanes of the same type, check other lanes
+        other_lanes = [lane for lane in CheckoutLane.all_lanes.values() if lane != self and lane.status == 'Open']
+        if other_lanes:
+            chosen_lane = random.choice(other_lanes)
+            chosen_lane.add_to_queue(basket_size)
+            print(f'Customer with {basket_size} items joined {chosen_lane.name}')
+            chosen_lane.process_customers()
+        else:
+            # If no open lanes, open a new lane of the appropriate type
+            new_lane = CheckoutLane(f'{self.name[0]}{len(CheckoutLane.all_lanes) + 1}',
+                                    max_queue_length=self.MAX_QUEUE_LENGTH, time_to_process=self.TTP)
+            new_lane.open_lane()
+            new_lane.add_to_queue(basket_size)
+            print(f'Customer with {basket_size} items joined {new_lane.name}')
+            new_lane.process_customers()  # Call process_customers instead of start_processing_basket
+
+# Prints the status to track the lanes at 30-second intervals
+def print_lane_statuses(lanes):
+    global is_running
+    while is_running:
+        print("\nLane Statuses:")
+        for lane in lanes:
+            lane.print_lane_status()
+        print("\n" + "=" * 30)
+        time.sleep(45)
+
+# Waits between 2 and 5 seconds to start this method and assigns a basket between 1 and 20 to a customer,
+# then adds this data to a random lane for testing
+def simulate_customers():
+    global is_running
+    while is_running:
+        time.sleep(random.uniform(5, 10))
+        basket_size = random.randint(1, 20)
+
+        # Find an open lane
+        open_lanes = [lane for lane in CheckoutLane.all_lanes.values() if lane.status == 'Open']
+        if open_lanes:
+            chosen_lane = random.choice(open_lanes)
+            chosen_lane.add_customer_to_lane(basket_size)
+        else:
+            print(f"No open lanes available for customer with {basket_size} items")
+
+# Function to periodically check and close empty lanes
+def check_and_close_empty_lanes(lanes):
+    global is_running
+    while is_running:
+        for lane in lanes:
+            lane.close_if_empty()
+        time.sleep(45)  # Adjust the sleep duration as needed
+
+# Function to periodically check and update lanes
+def check_and_update_lanes(lanes):
+    global is_running
+    while is_running:
+        # Ensure at least one self-service lane (S1) is open
+        s1_lane = CheckoutLane.all_lanes.get('S1')
+        if s1_lane and s1_lane.status == 'Closed':
+            s1_lane.open_lane()
+
+        # Ensure at least one regular lane (R1) is open
+        r1_lane = CheckoutLane.all_lanes.get('R1')
+        if r1_lane and r1_lane.status == 'Closed':
+            r1_lane.open_lane()
+
+        # Open more lanes if the existing lanes are almost full
+        for lane in lanes:
+            if lane.status == 'Closed' and len(lane.queue) >= lane.MAX_QUEUE_LENGTH * 0.8:
+                lane.open_lane()
+
+        time.sleep(45)  # Adjust the sleep duration as needed
+
+# Define a placeholder for the run_sub_program function
+def run_sub_program():
+    print("Run Sub-program")
+
+# Define functions for button actions in the GUI
+def start_checkout_simulation():
+    global is_running, status_timer_thread, customer_simulation_thread, check_empty_lanes_thread, check_update_lanes_thread, process_customers_thread
+    if not is_running:
+        is_running = True
+        status_timer_thread = threading.Thread(target=print_lane_statuses, args=(CheckoutLane.all_lanes.values(),))
+        customer_simulation_thread = threading.Thread(target=simulate_customers)
+        check_empty_lanes_thread = threading.Thread(target=check_and_close_empty_lanes, args=(CheckoutLane.all_lanes.values(),))
+        check_update_lanes_thread = threading.Thread(target=check_and_update_lanes, args=(CheckoutLane.all_lanes.values(),))
+        process_customers_thread = threading.Thread(target=CheckoutLane.process_customers)
+
+        status_timer_thread.start()
+        customer_simulation_thread.start()
+        check_empty_lanes_thread.start()
+        check_update_lanes_thread.start()
+        process_customers_thread.start()
+
+        print("Checkout simulation started")
+
+def stop_checkout_simulation():
+    global is_running
+    if is_running:
+        is_running = False
+        status_timer_thread.join()
+        customer_simulation_thread.join()
+        check_empty_lanes_thread.join()
+        check_update_lanes_thread.join()
+        process_customers_thread.join()
+        print("Checkout simulation stopped")
+
+def exit_checkout_application():
+    global is_running
+    is_running = False
+    window.destroy()
+
+# Creating lanes for both regular and self-service lanes
+self_checkout_lanes = [CheckoutLane(f'S{i}', max_queue_length=15, time_to_process=6) for i in range(1, 9)]
+self_checkout_lanes[0].open_lane()  # Open the first self-service lane
+
+regular_lanes = [CheckoutLane(f'R{i}', max_queue_length=5, time_to_process=4) for i in range(1, 6)]
+regular_lanes[0].open_lane()  # Open the first regular lane
+
+all_lanes = self_checkout_lanes + regular_lanes
+
+# Main loop of the GUI
+window = tkinter.Tk()
+window.geometry("700x700")
+window.title("Checkout system")
+
+label = tkinter.Label(window, text=("Checkout Simulation"), font=("Arial", 18))
+label.pack()
+
+# The variable buttons store 4 tuples each line has the name of the button associated with its respected function
+buttons = [("Start Checkout Simulation", start_checkout_simulation),
+           ("Run Sub-program", run_sub_program),
+           ("Stop Checkout Simulation", stop_checkout_simulation),
+           ("Exit", exit_checkout_application)]
+# Loops through each tuple in the buttons and assigns it where to be used, window, assigns a font and size while the command stays the same
+for text, command in buttons:
+    button = tkinter.Button(window, text=text, font=("Arial", 18), command=command)
+    button.pack(padx=10, pady=10)
+
+    # Adding the check_and_close_empty_lanes thread
+check_empty_lanes_thread = threading.Thread(target=check_and_close_empty_lanes, args=(all_lanes,))
+check_empty_lanes_thread.start()
+
+# Adding the check_and_update_lanes thread
+check_update_lanes_thread = threading.Thread(target=check_and_update_lanes, args=(all_lanes,))
+check_update_lanes_thread.start()
+
+# Main loop of the GUI
+window.mainloop()
